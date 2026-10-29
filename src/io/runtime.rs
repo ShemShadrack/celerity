@@ -585,14 +585,20 @@ fn outbound_item_bytes(item: &OutboundItem) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::{future::Future, task::Poll, time::Duration};
+
+    use bytes::Bytes;
+    use tokio::sync::{mpsc, watch};
+
     use crate::{
-        HwmConfig, HwmPolicy, LinkScope, LocalAuthPolicy, PeerConfig, SecurityConfig,
-        SecurityMechanism, SecurityPolicy, SecurityRole, SocketType,
+        HwmConfig, HwmPolicy, LinkScope, LocalAuthPolicy, OutboundItem, PeerConfig, PeerEvent,
+        SecurityConfig, SecurityMechanism, SecurityPolicy, SecurityRole, SocketType,
     };
 
     use super::{
-        DriverStatus, READ_BUFFER_CAPACITY, TransportKind, TransportMeta, apply_transport_policy,
-        can_take_command, curve_handshake_deadline, queue_has_headroom, terminal_error,
+        DriverStatus, READ_BUFFER_CAPACITY, RuntimeCommand, TransportKind, TransportMeta,
+        apply_transport_policy, can_take_command, curve_handshake_deadline, forward_peer_event,
+        queue_has_headroom, send_runtime_command_sync, terminal_error,
     };
     use crate::io::TokioCelerityError;
 
@@ -608,6 +614,68 @@ mod tests {
             Ok(_) => panic!("expected Err(..), got Ok(..)"),
             Err(err) => err,
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_send_does_not_leave_a_command_in_the_queue() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let (_status_tx, status_rx) = watch::channel(None);
+        let item = OutboundItem::Message(vec![Bytes::from_static(b"queued")]);
+        ok(tx.send(RuntimeCommand::Submit(item.clone())).await);
+        {
+            let send = send_runtime_command_sync(&tx, &status_rx, item.clone());
+            tokio::pin!(send);
+            let state = std::future::poll_fn(|cx| Poll::Ready(send.as_mut().poll(cx))).await;
+            assert!(state.is_pending());
+        }
+        assert!(matches!(rx.recv().await, Some(RuntimeCommand::Submit(_))));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        let send = send_runtime_command_sync(&tx, &status_rx, item);
+        tokio::pin!(send);
+        let state = std::future::poll_fn(|cx| Poll::Ready(send.as_mut().poll(cx))).await;
+        assert!(state.is_pending());
+        let Some(RuntimeCommand::SubmitSync(_, ack)) = rx.recv().await else {
+            panic!("missing send command");
+        };
+        ok(ack.send(Ok(())));
+        ok(send.await);
+    }
+
+    #[tokio::test]
+    async fn disconnect_releases_a_send_waiting_for_acknowledgement() {
+        let (tx, rx) = mpsc::channel(1);
+        let (status_tx, status_rx) = watch::channel(None);
+        let send =
+            send_runtime_command_sync(&tx, &status_rx, OutboundItem::Message(vec![Bytes::new()]));
+        tokio::pin!(send);
+        let state = std::future::poll_fn(|cx| Poll::Ready(send.as_mut().poll(cx))).await;
+        assert!(state.is_pending());
+        ok(status_tx.send(Some(DriverStatus::CleanShutdown)));
+        drop(rx);
+        assert!(matches!(
+            ok(tokio::time::timeout(Duration::from_secs(1), send).await),
+            Err(TokioCelerityError::BackgroundTaskEnded)
+        ));
+    }
+
+    #[tokio::test]
+    async fn slow_receivers_apply_backpressure_and_closed_receivers_release_it() {
+        let (tx, rx) = mpsc::channel(1);
+        let event = PeerEvent::Message(vec![Bytes::new()]);
+        ok(tx.send(event.clone()).await);
+        let forward = forward_peer_event(&tx, event, HwmConfig::default());
+        tokio::pin!(forward);
+        let state = std::future::poll_fn(|cx| Poll::Ready(forward.as_mut().poll(cx))).await;
+        assert!(state.is_pending());
+        drop(rx);
+        assert!(matches!(
+            ok(tokio::time::timeout(Duration::from_secs(1), forward).await),
+            Err(TokioCelerityError::ChannelClosed("peer event channel"))
+        ));
     }
 
     #[test]

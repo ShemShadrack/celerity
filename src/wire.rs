@@ -593,6 +593,60 @@ mod tests {
     }
 
     #[test]
+    fn frames_decode_at_every_split_point() {
+        for size in [0, 1, 255, 256, 1024] {
+            let body = Bytes::from(vec![0xAB; size]);
+            let encoded = ok(encode_message_frames(std::slice::from_ref(&body))).remove(0);
+            for split in 0..encoded.len() {
+                let mut input = InputBuffer::default();
+                input.push(encoded.slice(..split));
+                assert!(ok(try_decode_frame(&mut input, size)).is_none());
+                assert_eq!(input.remaining(), split);
+                input.push(encoded.slice(split..));
+                assert_eq!(some(ok(try_decode_frame(&mut input, size))).body, body);
+                assert_eq!(input.remaining(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn every_flag_byte_is_validated() {
+        for flags in 0..=u8::MAX {
+            let mut input = InputBuffer::default();
+            input.push(Bytes::from(vec![flags, 0, 0, 0, 0, 0, 0, 0, 0]));
+            let result = try_decode_frame(&mut input, 0);
+            if flags & !FrameFlags::all().bits() != 0 {
+                assert_eq!(err(result), ProtocolError::InvalidFrameFlags(flags));
+            } else if flags & (FrameFlags::COMMAND | FrameFlags::MORE).bits()
+                == (FrameFlags::COMMAND | FrameFlags::MORE).bits()
+            {
+                assert_eq!(err(result), ProtocolError::CommandWithMore);
+            } else {
+                assert_eq!(some(ok(result)).flags.bits(), flags);
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_rejects_every_truncated_property() {
+        let mut metadata = MetadataMap::new();
+        ok(metadata.insert("Socket-Type", "PULL"));
+        let encoded = ok(encode_metadata(&metadata));
+        for end in 1..encoded.len() {
+            assert_eq!(
+                err(decode_metadata(encoded.slice(..end))),
+                ProtocolError::InvalidCommandFrame
+            );
+        }
+        let mut oversized = vec![1, b'A'];
+        oversized.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            err(decode_metadata(Bytes::from(oversized))),
+            ProtocolError::InvalidCommandFrame
+        );
+    }
+
+    #[test]
     fn malformed_flags_are_rejected() {
         let mut input = InputBuffer::default();
         input.push(Bytes::from_static(&[0x80, 0x00]));

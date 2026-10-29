@@ -9,13 +9,14 @@ use celerity::io::{
     PubSocket, PullSocket, PushSocket, RepSocket, ReqSocket, SubSocket, TokioCelerity,
     TokioCelerityError, TransportKind, TransportMeta,
 };
+use celerity::{
+    CelerityPeer, HwmConfig, HwmPolicy, LinkScope, OutboundItem, PeerConfig, PeerEvent,
+    ProtocolAction, ProtocolError, ProtocolLimits, SecurityRole, SocketType,
+};
 #[cfg(feature = "curve")]
 use celerity::{CurveConfig, SecurityConfig};
-use celerity::{
-    HwmConfig, HwmPolicy, LinkScope, OutboundItem, PeerConfig, PeerEvent, ProtocolError,
-    SecurityRole, SocketType,
-};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
 #[cfg(unix)]
@@ -33,6 +34,83 @@ fn some<T>(value: Option<T>) -> T {
         Some(value) => value,
         None => panic!("expected Some(..), got None"),
     }
+}
+
+async fn raw_push_connection(limits: ProtocolLimits) -> (TcpStream, TokioCelerity) {
+    let listener = ok(TcpListener::bind("127.0.0.1:0").await);
+    let mut raw = ok(TcpStream::connect(ok(listener.local_addr())).await);
+    let (stream, _) = ok(listener.accept().await);
+    let mut receiver = ok(TokioCelerity::from_stream(
+        stream,
+        TransportMeta {
+            kind: TransportKind::Tcp,
+            link_scope: LinkScope::Local,
+            null_authorized: true,
+        },
+        PeerConfig::new(SocketType::Pull, SecurityRole::Server, LinkScope::Local)
+            .with_limits(limits),
+    ));
+    let mut peer = CelerityPeer::new(PeerConfig::new(
+        SocketType::Push,
+        SecurityRole::Client,
+        LinkScope::Local,
+    ));
+    let mut ready = false;
+    while !ready {
+        while let Some(action) = peer.poll_output() {
+            match action {
+                ProtocolAction::Write(bytes) => ok(raw.write_all(&bytes).await),
+                ProtocolAction::WriteVectored { header, body } => {
+                    ok(raw.write_all(&header).await);
+                    ok(raw.write_all(&body).await);
+                }
+                ProtocolAction::Event(PeerEvent::HandshakeComplete { .. }) => ready = true,
+                ProtocolAction::Event(event) => panic!("unexpected event: {event:?}"),
+            }
+        }
+        if !ready {
+            let mut buffer = [0; 1024];
+            let count = ok(raw.read(&mut buffer).await);
+            assert_ne!(count, 0);
+            ok(peer.handle_input(&buffer[..count]));
+        }
+    }
+    assert!(matches!(
+        receiver.recv().await,
+        Some(PeerEvent::HandshakeComplete { .. })
+    ));
+    (raw, receiver)
+}
+
+#[tokio::test]
+async fn disconnect_mid_multipart_does_not_deliver_partial_messages() {
+    let (mut raw, mut receiver) = ok(timeout(
+        Duration::from_secs(2),
+        raw_push_connection(ProtocolLimits::default()),
+    )
+    .await);
+    ok(raw.write_all(&[1, 2, b'a', b'b', 0, 4, b'x']).await);
+    ok(raw.shutdown().await);
+    assert!(ok(timeout(Duration::from_secs(2), receiver.recv()).await).is_none());
+    ok(ok(timeout(Duration::from_secs(2), receiver.join()).await));
+}
+
+#[tokio::test]
+async fn oversized_tcp_frame_is_rejected_without_waiting_for_payload() {
+    let limits = ProtocolLimits {
+        max_frame_bytes: 128,
+        ..ProtocolLimits::default()
+    };
+    let (mut raw, mut receiver) =
+        ok(timeout(Duration::from_secs(2), raw_push_connection(limits)).await);
+    ok(raw.write_all(&[2, 0, 0, 0, 0, 0, 0, 1, 0]).await);
+    assert!(ok(timeout(Duration::from_secs(2), receiver.recv()).await).is_none());
+    assert!(matches!(
+        ok(timeout(Duration::from_secs(2), receiver.join()).await),
+        Err(TokioCelerityError::Protocol(
+            ProtocolError::FrameLimitExceeded(128)
+        ))
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -673,6 +673,82 @@ mod tests {
     }
 
     #[test]
+    fn malformed_traffic_closes_the_peer_at_every_split_point() {
+        let cases = [
+            (vec![0x80, 0], ProtocolError::InvalidFrameFlags(0x80)),
+            (vec![5, 0], ProtocolError::CommandWithMore),
+            (vec![4, 0], ProtocolError::InvalidCommandFrame),
+            (vec![4, 2, 5, b'X'], ProtocolError::InvalidCommandFrame),
+            (
+                vec![4, 4, 3, b'B', b'A', b'D'],
+                ProtocolError::InvalidCommandFrame,
+            ),
+            (
+                vec![2, 0x80, 0, 0, 0, 0, 0, 0, 0],
+                ProtocolError::NegativeFrameLength,
+            ),
+        ];
+        for (bytes, expected) in cases {
+            for split in 0..=bytes.len() {
+                let mut receiver = limited_receiver(crate::ProtocolLimits::default());
+                let result = receiver
+                    .handle_input(&bytes[..split])
+                    .and_then(|()| receiver.handle_input(&bytes[split..]));
+                assert_eq!(err(result), expected);
+                assert_eq!(err(receiver.handle_input(&[0, 0])), expected);
+                assert_eq!(
+                    err(receiver.submit(&OutboundItem::Message(vec![Bytes::new()]))),
+                    expected
+                );
+                assert!(receiver.poll_output().is_none());
+                assert_eq!(receiver.input.remaining(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_multipart_messages_never_deliver() {
+        let mut receiver = limited_receiver(crate::ProtocolLimits {
+            max_message_frames: 64,
+            ..crate::ProtocolLimits::default()
+        });
+        for _ in 0..64 {
+            ok(receiver.handle_input(&[1, 1, 42]));
+            assert!(receiver.poll_output().is_none());
+        }
+        assert_eq!(
+            err(receiver.handle_input(&[1, 0])),
+            ProtocolError::MessageFrameLimitExceeded(64)
+        );
+        assert!(receiver.poll_output().is_none());
+        assert_eq!(receiver.current_message, Vec::<Bytes>::new());
+    }
+
+    #[cfg(feature = "curve")]
+    #[test]
+    fn corrupted_curve_traffic_closes_the_peer_without_delivery() {
+        let mut sender = CelerityPeer::new(non_local_curve(SocketType::Push, SecurityRole::Client));
+        let mut receiver =
+            CelerityPeer::new(non_local_curve(SocketType::Pull, SecurityRole::Server));
+        ok(pump(&mut sender, &mut receiver));
+        ok(sender.submit(&OutboundItem::Message(vec![Bytes::from_static(b"secret")])));
+        let mut bytes = flatten_write(some(sender.poll_output())).to_vec();
+        let Some(last) = bytes.last_mut() else {
+            panic!("missing encrypted payload");
+        };
+        *last ^= 1;
+        assert_eq!(
+            err(receiver.handle_input(&bytes)),
+            ProtocolError::CurveAuthenticationFailed
+        );
+        assert!(receiver.poll_output().is_none());
+        assert_eq!(
+            err(receiver.handle_input(&[0, 0])),
+            ProtocolError::CurveAuthenticationFailed
+        );
+    }
+
+    #[test]
     fn byte_by_byte_greeting_parsing() {
         let mut client = CelerityPeer::new(local_config(SocketType::Req, SecurityRole::Client));
         let mut server = CelerityPeer::new(local_config(SocketType::Rep, SecurityRole::Server));

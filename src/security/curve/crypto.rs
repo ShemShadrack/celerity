@@ -169,13 +169,6 @@ pub(super) fn open_message(
         return Err(ProtocolError::InvalidEncryptedMessage);
     }
 
-    rotate_if_needed(
-        &mut channel.recv,
-        channel.rekey_messages,
-        channel.rekey_bytes,
-        channel.transcript_hash,
-    )?;
-
     let mut payload = payload;
     let seq = payload.get_u64();
     if seq != channel.recv.seq {
@@ -185,6 +178,13 @@ pub(super) fn open_message(
     if payload.len() < 16 {
         return Err(ProtocolError::InvalidEncryptedMessage);
     }
+    let mut recv = channel.recv.clone();
+    rotate_if_needed(
+        &mut recv,
+        channel.rekey_messages,
+        channel.rekey_bytes,
+        channel.transcript_hash,
+    )?;
     let cipher_len = payload.len() - 16;
     let mut cipher = BytesMut::from(&payload[..cipher_len]);
     let tag: [u8; 16] = payload[cipher_len..]
@@ -192,15 +192,16 @@ pub(super) fn open_message(
         .map_err(|_| ProtocolError::InvalidEncryptedMessage)?;
 
     decrypt_in_place(
-        &channel.recv.key,
-        message_nonce(channel.recv.nonce_prefix, seq),
+        &recv.key,
+        message_nonce(recv.nonce_prefix, seq),
         &channel.transcript_hash,
         &mut cipher,
         tag,
     )?;
 
-    channel.recv.seq = channel.recv.seq.saturating_add(1);
-    channel.recv.bytes = channel.recv.bytes.saturating_add(cipher.len() as u64);
+    recv.seq = recv.seq.saturating_add(1);
+    recv.bytes = recv.bytes.saturating_add(cipher.len() as u64);
+    channel.recv = recv;
     Ok(cipher.freeze())
 }
 
@@ -510,6 +511,81 @@ mod tests {
         assert_eq!(
             err(open_message(&mut server, payload)),
             ProtocolError::CurveReplayDetected
+        );
+    }
+
+    #[test]
+    fn modified_ciphertext_and_tags_fail_authentication() {
+        let (mut client, server) = ok(sample_channels(0, 0));
+        let encrypted = ok(seal_message(&mut client, &Bytes::from_static(b"payload")));
+        for index in 8..encrypted.len() {
+            let mut receiver = server.clone();
+            let mut corrupted = encrypted.to_vec();
+            corrupted[index] ^= 1;
+            assert_eq!(
+                err(open_message(&mut receiver, Bytes::from(corrupted))),
+                ProtocolError::CurveAuthenticationFailed
+            );
+            assert_eq!(receiver.recv, server.recv);
+        }
+        for end in 0..24 {
+            let mut receiver = server.clone();
+            assert_eq!(
+                err(open_message(&mut receiver, encrypted.slice(..end))),
+                ProtocolError::InvalidEncryptedMessage
+            );
+            assert_eq!(receiver.recv, server.recv);
+        }
+    }
+
+    #[test]
+    fn out_of_order_messages_and_replays_fail_across_rekeying() {
+        let (mut client, mut server) = ok(sample_channels(1, 0));
+        let first = ok(seal_message(&mut client, &Bytes::from_static(b"one")));
+        let second = ok(seal_message(&mut client, &Bytes::from_static(b"two")));
+        assert_eq!(
+            err(open_message(&mut server, second.clone())),
+            ProtocolError::CurveReplayDetected
+        );
+        assert_eq!(
+            ok(open_message(&mut server, first.clone())),
+            Bytes::from_static(b"one")
+        );
+        assert_eq!(
+            ok(open_message(&mut server, second)),
+            Bytes::from_static(b"two")
+        );
+        assert_eq!(
+            err(open_message(&mut server, first)),
+            ProtocolError::CurveReplayDetected
+        );
+        let third = ok(seal_message(&mut client, &Bytes::from_static(b"three")));
+        assert_eq!(
+            ok(open_message(&mut server, third)),
+            Bytes::from_static(b"three")
+        );
+    }
+
+    #[test]
+    fn failed_authentication_does_not_advance_rekey_state() {
+        let (mut client, mut server) = ok(sample_channels(1, 0));
+        let first = ok(seal_message(&mut client, &Bytes::from_static(b"one")));
+        ok(open_message(&mut server, first));
+        let second = ok(seal_message(&mut client, &Bytes::from_static(b"two")));
+        let before = server.clone();
+        let mut corrupted = second.to_vec();
+        let Some(last) = corrupted.last_mut() else {
+            panic!("missing authentication tag");
+        };
+        *last ^= 1;
+        assert_eq!(
+            err(open_message(&mut server, Bytes::from(corrupted))),
+            ProtocolError::CurveAuthenticationFailed
+        );
+        assert_eq!(server, before);
+        assert_eq!(
+            ok(open_message(&mut server, second)),
+            Bytes::from_static(b"two")
         );
     }
 
