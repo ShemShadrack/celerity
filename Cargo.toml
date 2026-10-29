@@ -2,9 +2,10 @@
 name = "celerity"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.88"
 authors = ["shemtorga@gmail.com"]
 description = "Pure Rust sans-IO ZMTP 3.1 messaging core with Tokio TCP and Unix socket transports."
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/ShemShadrack/celerity"
 readme = "README.md"
 keywords = ["zmtp", "zeromq", "tokio", "ipc", "messaging"]
@@ -87,3 +88,19 @@ required-features = ["tokio"]
 name = "remote_lat"
 path = "src/bin/remote_lat.rs"
 required-features = ["tokio"]
+
+[[example]]
+name = "pub_sub"
+required-features = ["tokio"]
+
+[[example]]
+name = "req_rep"
+required-features = ["tokio"]
+
+[[example]]
+name = "push_pull"
+required-features = ["tokio"]
+
+[[example]]
+name = "curve"
+required-features = ["tokio", "curve"]

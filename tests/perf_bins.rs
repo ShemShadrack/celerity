@@ -30,7 +30,7 @@ fn bin_path(name: &str, fallback_name: &str) -> PathBuf {
 
     let exe = ok(std::env::current_exe());
     let target_dir = some(some(exe.parent()).parent());
-    let path = target_dir.join(fallback_name);
+    let path = target_dir.join(format!("{fallback_name}{}", std::env::consts::EXE_SUFFIX));
     if path.exists() {
         return path;
     }

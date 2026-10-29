@@ -13,7 +13,7 @@ The project is aimed at people who want a small, direct Rust messaging stack wit
 - ZMTP 3.1 greeting, handshake, framing, and multipart message handling
 - Sans-IO `CelerityPeer` core
 - Tokio transport wrappers for TCP and IPC on Unix
-- `PUB/SUB` and `REQ/REP` helpers
+- `PUB/SUB`, `REQ/REP`, and `PUSH/PULL` helpers
 - CURVE-RS encrypted transport mode for non-local links
 - `cel-cat` CLI for quick local testing
 
@@ -62,37 +62,11 @@ Terminal 2:
 cargo run --all-features --bin cel-cat -- pub 127.0.0.1:5555 hello from tcp
 ```
 
-### TCP between your host and a VM on the same network
+### Remote TCP
 
-This is still TCP. It is the right transport when your host machine and a VM need to talk over a real IP address on the same LAN, bridged adapter, or host-only network.
-
-Example with the host publishing and the VM subscribing:
-
-On your host Mac:
-
-```bash
-cargo run --all-features --bin cel-cat -- pub 0.0.0.0:5555 hello from host
-```
-
-On your Kali VM:
-
-```bash
-cargo run --all-features --bin cel-cat -- sub <HOST-IP>:5555
-```
-
-Example with the VM publishing and the host subscribing:
-
-On your Kali VM:
-
-```bash
-cargo run --all-features --bin cel-cat -- pub 0.0.0.0:5555 hello from kali
-```
-
-On your host Mac:
-
-```bash
-cargo run --all-features --bin cel-cat -- sub <VM-IP>:5555
-```
+For host-to-VM or other non-loopback connections, use the library with explicit
+CURVE-RS keys. The CLI does not configure encrypted connections; see the
+[`curve` example](examples/curve.rs).
 
 ### IPC on the same machine
 
@@ -173,6 +147,39 @@ celerity = { version = "0.2.0", features = ["tokio", "ipc", "curve"] }
 ```
 
 At the core is `CelerityPeer`, which owns protocol state but no sockets. The Tokio wrappers in `celerity::io` sit on top when you want real network transport.
+
+## Examples and Compatibility
+
+Requires Rust 1.88 or newer. Each example runs both peers locally:
+
+```bash
+cargo run --features tokio --example pub_sub
+cargo run --features tokio --example req_rep
+cargo run --features tokio --example push_pull
+cargo run --features tokio,curve --example curve
+```
+
+On Unix, `push_pull` also accepts an `ipc://` endpoint. The CURVE-RS example
+pins the server key and restricts accepted client keys. It generates temporary
+keys; load saved keypairs when identities must survive a restart.
+
+CI tests PUB/SUB, REQ/REP, and PUSH/PULL against libzmq through pyzmq, in both
+directions over TCP with NULL security. Payloads include empty, binary, and long
+multipart frames. The local reference version is libzmq 4.3.5 (pyzmq 27.2.0).
+These tests cover message exchange and subscription filtering, not full libzmq
+API parity, automatic reconnection, or heartbeat support.
+
+CURVE-RS is a separate security mechanism, not compatible with libzmq CURVE.
+Celerity rejects the standard `CURVE` greeting rather than attempting a CURVE-RS
+handshake.
+
+To run the interoperability tests locally on Unix:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install pyzmq==27.2.0
+CELERITY_TEST_PYTHON=.venv/bin/python cargo test --features tokio --test libzmq -- --ignored
+```
 
 ## Development
 

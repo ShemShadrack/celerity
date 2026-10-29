@@ -160,17 +160,16 @@ pub(crate) fn decode_greeting(bytes: &[u8]) -> Result<Greeting, ProtocolError> {
         return Err(ProtocolError::InvalidGreetingSignature);
     }
 
-    if bytes[1..9].iter().any(|byte| *byte != 0)
-        || bytes[33..]
-            .iter()
-            .take(GREETING_FILLER_LEN)
-            .any(|byte| *byte != 0)
+    if bytes[33..]
+        .iter()
+        .take(GREETING_FILLER_LEN)
+        .any(|byte| *byte != 0)
     {
         // Non-zero filler means the peer is not speaking the expected greeting format.
         return Err(ProtocolError::InvalidGreetingFiller);
     }
 
-    if bytes[10] != ZMTP_MAJOR || bytes[11] != ZMTP_MINOR {
+    if (bytes[10], bytes[11]) < (ZMTP_MAJOR, ZMTP_MINOR) {
         return Err(ProtocolError::UnsupportedVersion {
             major: bytes[10],
             minor: bytes[11],
@@ -492,8 +491,7 @@ fn parse_mechanism(field: &[u8]) -> Result<SecurityMechanism, ProtocolError> {
 
     match &field[..end] {
         b"NULL" => Ok(SecurityMechanism::Null),
-        // Accept both the short and explicit CURVE-RS markers on the wire.
-        b"CURVE" | b"CURVE-RS" => Ok(SecurityMechanism::Curve),
+        b"CURVE-RS" => Ok(SecurityMechanism::Curve),
         other => Err(ProtocolError::UnsupportedMechanismName(
             String::from_utf8_lossy(other).into_owned(),
         )),
@@ -669,6 +667,21 @@ mod tests {
     }
 
     #[test]
+    fn greeting_accepts_signature_padding_and_newer_versions() {
+        let config = PeerConfig::new(SocketType::Req, SecurityRole::Client, LinkScope::Local);
+        for version in [(3, 1), (3, 255), (4, 0)] {
+            let mut greeting = encode_greeting(&config).to_vec();
+            greeting[1..9].fill(0xAB);
+            greeting[10] = version.0;
+            greeting[11] = version.1;
+            assert_eq!(
+                ok(decode_greeting(&greeting)).mechanism,
+                SecurityMechanism::Null
+            );
+        }
+    }
+
+    #[test]
     fn greeting_has_expected_wire_size() {
         let config = PeerConfig::new(SocketType::Pub, SecurityRole::Server, LinkScope::NonLocal)
             .with_security(SecurityConfig::curve());
@@ -692,15 +705,15 @@ mod tests {
         );
 
         let mut bad_version = encode_greeting(&config).to_vec();
-        bad_version[10] = 9;
+        bad_version[10] = 2;
         assert_eq!(
             err(decode_greeting(&Bytes::from(bad_version))),
-            ProtocolError::UnsupportedVersion { major: 9, minor: 1 }
+            ProtocolError::UnsupportedVersion { major: 2, minor: 1 }
         );
     }
 
     #[test]
-    fn greeting_accepts_short_curve_mechanism_marker() {
+    fn greeting_rejects_standard_curve_mechanism_marker() {
         let config = PeerConfig::new(SocketType::Req, SecurityRole::Client, LinkScope::NonLocal)
             .with_security(SecurityConfig::curve());
         let mut greeting = encode_greeting(&config).to_vec();
@@ -708,8 +721,10 @@ mod tests {
         field.fill(0);
         field[..5].copy_from_slice(b"CURVE");
 
-        let decoded = ok(decode_greeting(&Bytes::from(greeting)));
-        assert_eq!(decoded.mechanism, SecurityMechanism::Curve);
+        assert_eq!(
+            err(decode_greeting(&greeting)),
+            ProtocolError::UnsupportedMechanismName("CURVE".into())
+        );
     }
 
     #[test]

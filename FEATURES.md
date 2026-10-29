@@ -12,13 +12,8 @@ It is intentionally not a promise, release plan, or strict priority order. The g
 
 ### Pattern Coverage
 
-- `PUSH/PULL`
-  - High value because it unlocks the classic pipeline pattern.
-  - Also needed for an apples-to-apples clone of libzmq's throughput benchmark.
-
 - `DEALER/ROUTER`
   - Important for more advanced request-routing topologies.
-  - Likely the next major step after `PUSH/PULL` if broader ZeroMQ compatibility is the goal.
 
 - `XPUB/XSUB`
   - Useful for proxying, subscription-aware routing, and richer pub-sub topologies.
@@ -28,9 +23,6 @@ It is intentionally not a promise, release plan, or strict priority order. The g
 
 ### Performance and Benchmarking
 
-- Replicate libzmq latency benchmark with `REQ/REP`.
-- Replicate libzmq throughput benchmark with `PUSH/PULL`.
-- Publish benchmark methodology and machine details in the repo.
 - Compare loopback TCP and IPC performance.
 - Add profiling notes for Linux `perf` and flamegraph-based investigation.
 
@@ -42,9 +34,7 @@ It is intentionally not a promise, release plan, or strict priority order. The g
 
 ### Developer Experience
 
-- More examples for common topologies.
 - Clearer security-configuration examples, especially for non-local `NULL`.
-- Compatibility notes explaining what matches libzmq semantics and what is intentionally different.
 
 ## Later Features
 

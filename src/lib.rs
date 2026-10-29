@@ -98,7 +98,7 @@ pub enum LinkScope {
 pub enum SecurityMechanism {
     /// The plaintext NULL mechanism.
     Null,
-    /// The authenticated and encrypted CURVE mechanism.
+    /// The authenticated and encrypted CURVE-RS mechanism; not wire-compatible with CURVE.
     Curve,
 }
 

@@ -98,45 +98,12 @@ Terminal 2:
 ./perf/remote_thr tcp://127.0.0.1:5555 1024 1000000
 ```
 
-## Current Baseline
+## Small-message Profile
 
-The tables below record the current matched-count loopback comparison between:
+`bench_small.py` records every run and reports medians instead of selecting a best run.
 
-- Celerity from this repo
-- libzmq built locally
-
-These results were collected with:
-
-- Throughput: `COUNT=1000000 ./perf/run_thr.sh`
-- Latency: `COUNT=10000 ./perf/run_lat.sh`
-- Matching libzmq perf binaries with the same endpoint, sizes, and counts
-
-The tables below show the key comparison sizes used for quick baseline checks.
-
-### Latency Baseline
-
-| Size | libzmq | Celerity | Gap |
-| --- | ---: | ---: | ---: |
-| 1B | 58.96 us | 103.73 us | 1.76x |
-| 64B | 53.62 us | 88.36 us | 1.65x |
-| 1KB | 56.14 us | 98.83 us | 1.76x |
-| 64KB | 140.83 us | 197.30 us | 1.40x |
-
-### Throughput Baseline
-
-| Size | libzmq | Celerity | Gap |
-| --- | ---: | ---: | ---: |
-| 1B | 4,393,364 msg/s | 865,874 msg/s | 5.07x |
-| 64B | 3,564,719 msg/s | 787,369 msg/s | 4.53x |
-| 1KB | 896,963 msg/s | 738,564 msg/s | 1.21x |
-| 4KB | 247,479 msg/s | 411,541 msg/s | Celerity 1.66x faster |
-| 64KB | 11,619 msg/s | 23,519 msg/s | Celerity 2.02x faster |
-
-Notes:
-
-- Small-message throughput is still where libzmq leads most clearly.
-- At `4KB` and `64KB`, the current Celerity transport path is faster than the local libzmq build on this machine.
-- These numbers are machine-specific and should be treated as a baseline, not a guarantee.
+Earlier latency samples remain in `celerity_lat_results.csv` and
+`libzmq_lat_results.csv`; their machine details were not recorded.
 
 ## Suggested Method
 

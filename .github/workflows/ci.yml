@@ -36,7 +36,11 @@ jobs:
         run: cargo clippy ${{ matrix.args }} -- -D warnings
 
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Check out repository
@@ -56,3 +60,29 @@ jobs:
 
       - name: Run full feature tests
         run: cargo test --all-features
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --all-features
+
+  interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pyzmq==27.2.0
+      - run: python -c "import zmq; print('pyzmq', zmq.__version__, 'libzmq', zmq.zmq_version())"
+      - run: cargo test --features tokio --test libzmq -- --ignored
+      - run: cargo run --features tokio --example pub_sub
+      - run: cargo run --features tokio --example req_rep
+      - run: cargo run --features tokio --example push_pull
+      - run: cargo run --features tokio,curve --example curve

@@ -34,7 +34,7 @@ fn cel_cat_path() -> PathBuf {
     let exe = ok(std::env::current_exe());
     let target_dir = some(some(exe.parent()).parent());
     for candidate in ["cel-cat", "cel_cat"] {
-        let path = target_dir.join(candidate);
+        let path = target_dir.join(format!("{candidate}{}", std::env::consts::EXE_SUFFIX));
         if path.exists() {
             return path;
         }
