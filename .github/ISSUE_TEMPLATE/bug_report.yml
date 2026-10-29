@@ -1,0 +1,25 @@
+name: Bug report
+description: Report a reproducible problem in Celerity.
+body:
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Celerity version or commit, Rust version, OS, enabled features, and transport.
+      placeholder: "celerity 0.2.0, Rust 1.99.1, Linux, features=tokio, TCP loopback"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproducer
+      description: Include the smallest code example or commands that trigger the problem. Use test keys only.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual behavior
+      description: Include error messages or relevant logs as text.
+    validations:
+      required: true
