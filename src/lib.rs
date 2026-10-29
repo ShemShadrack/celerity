@@ -502,6 +502,30 @@ fn validate_metadata_name(name: &[u8]) -> Result<(), ProtocolError> {
     }
 }
 
+/// Inbound protocol limits. Zero permits no bytes or frames for that limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtocolLimits {
+    /// Maximum frame payload size, including command and encrypted frame payloads.
+    pub max_frame_bytes: usize,
+    /// Maximum total payload bytes in a multipart message after decryption.
+    pub max_message_bytes: usize,
+    /// Maximum number of frames in a multipart message, including empty frames.
+    pub max_message_frames: usize,
+    /// Maximum unparsed transport bytes retained by the peer.
+    pub max_buffered_bytes: usize,
+}
+
+impl Default for ProtocolLimits {
+    fn default() -> Self {
+        Self {
+            max_frame_bytes: 16 << 20,
+            max_message_bytes: 64 << 20,
+            max_message_frames: 1024,
+            max_buffered_bytes: (16 << 20) + 9,
+        }
+    }
+}
+
 /// Configuration used to build a [`CelerityPeer`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerConfig {
@@ -519,6 +543,8 @@ pub struct PeerConfig {
     pub metadata: MetadataMap,
     /// High-water mark limits used by the runtime adapters.
     pub hwm: HwmConfig,
+    /// Inbound limits enforced by the protocol core.
+    pub limits: ProtocolLimits,
 }
 
 impl PeerConfig {
@@ -537,6 +563,7 @@ impl PeerConfig {
             identity: None,
             metadata: MetadataMap::new(),
             hwm: HwmConfig::default(),
+            limits: ProtocolLimits::default(),
         }
     }
 
@@ -565,6 +592,13 @@ impl PeerConfig {
     #[must_use]
     pub fn with_hwm(mut self, hwm: HwmConfig) -> Self {
         self.hwm = hwm;
+        self
+    }
+
+    /// Replaces the inbound protocol limits.
+    #[must_use]
+    pub fn with_limits(mut self, limits: ProtocolLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -743,6 +777,18 @@ pub enum ProtocolError {
     /// A frame length exceeded the limits supported by the platform.
     #[error("frame size {0} exceeds platform limits")]
     FrameTooLarge(u64),
+    /// A frame payload exceeded the configured byte limit.
+    #[error("frame payload exceeds {0} bytes")]
+    FrameLimitExceeded(usize),
+    /// A multipart message exceeded the configured byte limit.
+    #[error("message payload exceeds {0} bytes")]
+    MessageLimitExceeded(usize),
+    /// A multipart message exceeded the configured frame count.
+    #[error("message exceeds {0} frames")]
+    MessageFrameLimitExceeded(usize),
+    /// Unparsed transport input reached the configured buffer limit.
+    #[error("input buffer exceeds {0} bytes")]
+    InputBufferLimitExceeded(usize),
     /// A command frame payload was malformed.
     #[error("invalid command frame")]
     InvalidCommandFrame,

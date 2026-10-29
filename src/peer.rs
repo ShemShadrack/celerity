@@ -32,6 +32,7 @@ pub struct CelerityPeer {
     state: PeerState,
     output: VecDeque<ProtocolAction>,
     current_message: Vec<Bytes>,
+    current_message_bytes: usize,
     terminal_error: Option<ProtocolError>,
 }
 
@@ -68,6 +69,7 @@ impl CelerityPeer {
             state,
             output,
             current_message: Vec::new(),
+            current_message_bytes: 0,
             terminal_error,
         }
     }
@@ -79,7 +81,11 @@ impl CelerityPeer {
     /// Returns an error when the input violates the handshake, framing, or
     /// message-processing rules for the configured protocol state.
     pub fn handle_input(&mut self, data: &[u8]) -> Result<(), ProtocolError> {
-        self.handle_input_bytes(Bytes::copy_from_slice(data))
+        self.ensure_open()?;
+        for chunk in data.chunks(self.config.limits.max_buffered_bytes.max(1)) {
+            self.handle_input_bytes(Bytes::copy_from_slice(chunk))?;
+        }
+        Ok(())
     }
 
     /// Feeds owned transport bytes into the peer state machine.
@@ -90,8 +96,24 @@ impl CelerityPeer {
     /// message-processing rules for the configured protocol state.
     pub fn handle_input_bytes(&mut self, data: Bytes) -> Result<(), ProtocolError> {
         self.ensure_open()?;
-        self.input.push(data);
+        let mut data = data;
+        while !data.is_empty() {
+            let available = self.config.limits.max_buffered_bytes - self.input.remaining();
+            if available == 0 {
+                return self.fail(ProtocolError::InputBufferLimitExceeded(
+                    self.config.limits.max_buffered_bytes,
+                ));
+            }
+            let count = data.len().min(available);
+            self.input.push(data.split_to(count));
+            if let Err(err) = self.process_input() {
+                return self.fail(err);
+            }
+        }
+        Ok(())
+    }
 
+    fn process_input(&mut self) -> Result<(), ProtocolError> {
         loop {
             match self.state {
                 PeerState::Greeting => {
@@ -101,7 +123,9 @@ impl CelerityPeer {
                     self.process_greeting(&bytes)?;
                 }
                 PeerState::Handshake => {
-                    let Some(frame) = try_decode_frame(&mut self.input)? else {
+                    let Some(frame) =
+                        try_decode_frame(&mut self.input, self.config.limits.max_frame_bytes)?
+                    else {
                         break;
                     };
                     if !frame.flags.contains(FrameFlags::COMMAND) {
@@ -112,7 +136,9 @@ impl CelerityPeer {
                     self.process_handshake_command(command)?;
                 }
                 PeerState::Traffic => {
-                    let Some(frame) = try_decode_frame(&mut self.input)? else {
+                    let Some(frame) =
+                        try_decode_frame(&mut self.input, self.config.limits.max_frame_bytes)?
+                    else {
                         break;
                     };
                     self.process_traffic_frame(frame.flags, frame.body)?;
@@ -244,8 +270,7 @@ impl CelerityPeer {
                 Command::Message(payload) => self.process_secure_message(payload),
             }
         } else {
-            self.process_plain_traffic_frame(flags, body);
-            Ok(())
+            self.process_plain_traffic_frame(flags, body)
         }
     }
 
@@ -256,7 +281,8 @@ impl CelerityPeer {
         input.push(decrypted);
 
         loop {
-            let Some(frame) = try_decode_frame(&mut input)? else {
+            let Some(frame) = try_decode_frame(&mut input, self.config.limits.max_frame_bytes)?
+            else {
                 if input.remaining() == 0 {
                     return Ok(());
                 }
@@ -301,19 +327,37 @@ impl CelerityPeer {
                     }
                 }
             } else {
-                self.process_plain_traffic_frame(frame.flags, frame.body);
+                self.process_plain_traffic_frame(frame.flags, frame.body)?;
             }
         }
     }
 
-    fn process_plain_traffic_frame(&mut self, flags: FrameFlags, body: Bytes) {
+    fn process_plain_traffic_frame(
+        &mut self,
+        flags: FrameFlags,
+        body: Bytes,
+    ) -> Result<(), ProtocolError> {
+        let limits = self.config.limits;
+        if self.current_message.len() >= limits.max_message_frames {
+            return self.fail(ProtocolError::MessageFrameLimitExceeded(
+                limits.max_message_frames,
+            ));
+        }
+        if body.len() > limits.max_message_bytes - self.current_message_bytes {
+            return self.fail(ProtocolError::MessageLimitExceeded(
+                limits.max_message_bytes,
+            ));
+        }
+        self.current_message_bytes += body.len();
         self.current_message.push(body);
         if !flags.contains(FrameFlags::MORE) {
             // Delivery happens only once we see the final frame of the multipart.
             let message = std::mem::take(&mut self.current_message);
+            self.current_message_bytes = 0;
             self.output
                 .push_back(ProtocolAction::Event(PeerEvent::Message(message)));
         }
+        Ok(())
     }
 
     fn finish_handshake(&mut self, complete: HandshakeComplete) {
@@ -328,6 +372,9 @@ impl CelerityPeer {
 
     fn fail<T>(&mut self, err: ProtocolError) -> Result<T, ProtocolError> {
         self.state = PeerState::Closed;
+        self.input = InputBuffer::default();
+        self.current_message.clear();
+        self.current_message_bytes = 0;
         self.terminal_error = Some(err.clone());
         Err(err)
     }
@@ -437,6 +484,192 @@ mod tests {
         }
 
         Ok(events)
+    }
+
+    fn limited_receiver(limits: crate::ProtocolLimits) -> CelerityPeer {
+        let mut sender = CelerityPeer::new(local_config(SocketType::Push, SecurityRole::Client));
+        let mut receiver = CelerityPeer::new(
+            local_config(SocketType::Pull, SecurityRole::Server).with_limits(limits),
+        );
+        ok(pump(&mut sender, &mut receiver));
+        receiver
+    }
+
+    #[test]
+    fn oversized_frame_headers_close_the_peer_before_payload_arrives() {
+        for header in [vec![0, 129], vec![2, 0, 0, 0, 0, 0, 0, 0, 129]] {
+            let mut receiver = limited_receiver(crate::ProtocolLimits {
+                max_frame_bytes: 128,
+                ..crate::ProtocolLimits::default()
+            });
+            for byte in &header[..header.len() - 1] {
+                ok(receiver.handle_input(&[*byte]));
+            }
+            let error = err(receiver.handle_input(&header[header.len() - 1..]));
+            assert_eq!(error, ProtocolError::FrameLimitExceeded(128));
+            assert_eq!(err(receiver.handle_input(&[])), error);
+            assert_eq!(receiver.input.remaining(), 0);
+        }
+    }
+
+    #[test]
+    fn multipart_byte_limit_counts_frames_and_resets_after_delivery() {
+        let mut receiver = limited_receiver(crate::ProtocolLimits {
+            max_message_bytes: 4,
+            ..crate::ProtocolLimits::default()
+        });
+        for _ in 0..2 {
+            ok(receiver.handle_input(&[1, 2, b'a', b'b', 0, 2, b'c', b'd']));
+            assert!(
+                matches!(receiver.poll_output(), Some(ProtocolAction::Event(PeerEvent::Message(message)))
+                if message == vec![Bytes::from_static(b"ab"), Bytes::from_static(b"cd")])
+            );
+        }
+        ok(receiver.handle_input(&[1, 4, b'a', b'b', b'c', b'd']));
+        assert_eq!(
+            err(receiver.handle_input(&[0, 1, b'e'])),
+            ProtocolError::MessageLimitExceeded(4)
+        );
+        assert!(receiver.current_message.is_empty());
+        assert_eq!(receiver.current_message_bytes, 0);
+        assert!(receiver.poll_output().is_none());
+    }
+
+    #[test]
+    fn multipart_frame_limit_counts_empty_frames() {
+        let mut receiver = limited_receiver(crate::ProtocolLimits {
+            max_message_frames: 2,
+            max_message_bytes: 0,
+            ..crate::ProtocolLimits::default()
+        });
+        ok(receiver.handle_input(&[1, 0, 0, 0]));
+        assert!(
+            matches!(receiver.poll_output(), Some(ProtocolAction::Event(PeerEvent::Message(message))) if message.len() == 2)
+        );
+        ok(receiver.handle_input(&[1, 0, 1, 0]));
+        assert_eq!(
+            err(receiver.handle_input(&[1, 0])),
+            ProtocolError::MessageFrameLimitExceeded(2)
+        );
+        assert!(receiver.current_message.is_empty());
+    }
+
+    #[test]
+    fn input_buffer_limit_applies_before_and_after_handshake() {
+        let mut peer = CelerityPeer::new(
+            local_config(SocketType::Pull, SecurityRole::Server).with_limits(
+                crate::ProtocolLimits {
+                    max_buffered_bytes: 8,
+                    ..crate::ProtocolLimits::default()
+                },
+            ),
+        );
+        ok(peer.handle_input(&[0; 8]));
+        assert_eq!(
+            err(peer.handle_input(&[0])),
+            ProtocolError::InputBufferLimitExceeded(8)
+        );
+        assert_eq!(peer.input.remaining(), 0);
+
+        let mut receiver = limited_receiver(crate::ProtocolLimits {
+            max_buffered_bytes: 128,
+            ..crate::ProtocolLimits::default()
+        });
+        ok(receiver.handle_input(&[0, 127]));
+        ok(receiver.handle_input(&[0; 126]));
+        assert_eq!(
+            err(receiver.handle_input_bytes(Bytes::from_static(&[0]))),
+            ProtocolError::InputBufferLimitExceeded(128)
+        );
+        assert_eq!(receiver.input.remaining(), 0);
+    }
+
+    #[test]
+    fn coalesced_messages_can_exceed_the_input_buffer_limit() {
+        for owned in [false, true] {
+            let mut receiver = limited_receiver(crate::ProtocolLimits {
+                max_buffered_bytes: 128,
+                max_frame_bytes: 126,
+                ..crate::ProtocolLimits::default()
+            });
+            let mut input = vec![0, 126];
+            input.extend_from_slice(&[42; 126]);
+            input.extend_from_slice(&[0, 0].repeat(128));
+            if owned {
+                ok(receiver.handle_input_bytes(Bytes::from(input)));
+            } else {
+                ok(receiver.handle_input(&input));
+            }
+            let mut delivered = 0;
+            while let Some(action) = receiver.poll_output() {
+                assert!(matches!(
+                    action,
+                    ProtocolAction::Event(PeerEvent::Message(_))
+                ));
+                delivered += 1;
+            }
+            assert_eq!(delivered, 129);
+            assert_eq!(receiver.input.remaining(), 0);
+        }
+    }
+
+    #[test]
+    fn zero_limits_reject_input_and_message_frames() {
+        let mut peer = CelerityPeer::new(
+            local_config(SocketType::Pull, SecurityRole::Server).with_limits(
+                crate::ProtocolLimits {
+                    max_buffered_bytes: 0,
+                    ..crate::ProtocolLimits::default()
+                },
+            ),
+        );
+        assert_eq!(
+            err(peer.handle_input_bytes(Bytes::from_static(&[0]))),
+            ProtocolError::InputBufferLimitExceeded(0)
+        );
+        let mut receiver = limited_receiver(crate::ProtocolLimits {
+            max_message_frames: 0,
+            ..crate::ProtocolLimits::default()
+        });
+        assert_eq!(
+            err(receiver.handle_input(&[0, 0])),
+            ProtocolError::MessageFrameLimitExceeded(0)
+        );
+    }
+
+    #[cfg(feature = "curve")]
+    #[test]
+    fn curve_multipart_limits_apply_to_decrypted_frames() {
+        for (limits, expected) in [
+            (
+                crate::ProtocolLimits {
+                    max_message_bytes: 3,
+                    ..crate::ProtocolLimits::default()
+                },
+                ProtocolError::MessageLimitExceeded(3),
+            ),
+            (
+                crate::ProtocolLimits {
+                    max_message_frames: 1,
+                    ..crate::ProtocolLimits::default()
+                },
+                ProtocolError::MessageFrameLimitExceeded(1),
+            ),
+        ] {
+            let mut sender =
+                CelerityPeer::new(non_local_curve(SocketType::Push, SecurityRole::Client));
+            let mut receiver = CelerityPeer::new(
+                non_local_curve(SocketType::Pull, SecurityRole::Server).with_limits(limits),
+            );
+            ok(pump(&mut sender, &mut receiver));
+            ok(sender.submit(&OutboundItem::Message(vec![
+                Bytes::from_static(b"ab"),
+                Bytes::from_static(b"cd"),
+            ])));
+            assert_eq!(err(pump(&mut sender, &mut receiver)), expected);
+            assert!(receiver.current_message.is_empty());
+            assert_eq!(err(receiver.handle_input(&[])), expected);
+        }
     }
 
     #[test]

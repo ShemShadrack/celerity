@@ -185,7 +185,10 @@ pub(crate) fn decode_greeting(bytes: &[u8]) -> Result<Greeting, ProtocolError> {
     })
 }
 
-pub(crate) fn try_decode_frame(input: &mut InputBuffer) -> Result<Option<Frame>, ProtocolError> {
+pub(crate) fn try_decode_frame(
+    input: &mut InputBuffer,
+    max_frame_bytes: usize,
+) -> Result<Option<Frame>, ProtocolError> {
     if input.remaining() < 2 {
         return Ok(None);
     }
@@ -230,7 +233,13 @@ pub(crate) fn try_decode_frame(input: &mut InputBuffer) -> Result<Option<Frame>,
         size as usize
     };
 
-    if input.remaining() < 1 + size_len + size {
+    if size > max_frame_bytes {
+        return Err(ProtocolError::FrameLimitExceeded(max_frame_bytes));
+    }
+    let frame_len = size
+        .checked_add(1 + size_len)
+        .ok_or(ProtocolError::FrameTooLarge(size as u64))?;
+    if input.remaining() < frame_len {
         return Ok(None);
     }
 
@@ -553,7 +562,7 @@ mod tests {
         let mut input = InputBuffer::default();
         input.push(encoded);
 
-        let frame = some(ok(try_decode_frame(&mut input)));
+        let frame = some(ok(try_decode_frame(&mut input, usize::MAX)));
         assert_eq!(frame.flags, FrameFlags::COMMAND);
         let decoded = ok(decode_command(frame.body));
         let Command::Ready(bytes) = decoded else {
@@ -574,11 +583,11 @@ mod tests {
             input.push(frame.clone());
         }
 
-        let first = some(ok(try_decode_frame(&mut input)));
+        let first = some(ok(try_decode_frame(&mut input, usize::MAX)));
         assert_eq!(first.flags, FrameFlags::MORE);
         assert_eq!(first.body, Bytes::from_static(b"short"));
 
-        let second = some(ok(try_decode_frame(&mut input)));
+        let second = some(ok(try_decode_frame(&mut input, usize::MAX)));
         assert!(second.flags.contains(FrameFlags::LONG));
         assert_eq!(second.body, Bytes::from(vec![0xAB; 512]));
     }
@@ -588,7 +597,7 @@ mod tests {
         let mut input = InputBuffer::default();
         input.push(Bytes::from_static(&[0x80, 0x00]));
         assert_eq!(
-            err(try_decode_frame(&mut input)),
+            err(try_decode_frame(&mut input, usize::MAX)),
             ProtocolError::InvalidFrameFlags(0x80)
         );
     }
@@ -600,7 +609,7 @@ mod tests {
         frame.extend_from_slice(&(1_u64 << 63).to_be_bytes());
         input.push(Bytes::from(frame));
         assert_eq!(
-            err(try_decode_frame(&mut input)),
+            err(try_decode_frame(&mut input, usize::MAX)),
             ProtocolError::NegativeFrameLength
         );
     }
@@ -650,6 +659,19 @@ mod tests {
     }
 
     #[test]
+    fn frame_limits_apply_to_commands_and_zero_length_frames() {
+        let mut input = InputBuffer::default();
+        input.push(Bytes::from(vec![FrameFlags::COMMAND.bits(), 1]));
+        assert_eq!(
+            err(try_decode_frame(&mut input, 0)),
+            ProtocolError::FrameLimitExceeded(0)
+        );
+        let mut input = InputBuffer::default();
+        input.push(Bytes::from_static(&[0, 0]));
+        assert!(some(ok(try_decode_frame(&mut input, 0))).body.is_empty());
+    }
+
+    #[test]
     fn command_frames_must_not_set_more() {
         let mut input = InputBuffer::default();
         input.push(Bytes::from(vec![
@@ -658,7 +680,7 @@ mod tests {
         ]));
 
         assert_eq!(
-            err(try_decode_frame(&mut input)),
+            err(try_decode_frame(&mut input, usize::MAX)),
             ProtocolError::CommandWithMore
         );
     }
