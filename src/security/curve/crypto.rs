@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{PeerConfig, ProtocolError, SecurityRole};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct TrafficKey {
     key: [u8; 32],
     nonce_prefix: [u8; 4],
@@ -11,7 +11,7 @@ struct TrafficKey {
     epoch: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct SecureChannel {
     send: TrafficKey,
     recv: TrafficKey,
@@ -20,11 +20,29 @@ pub(super) struct SecureChannel {
     rekey_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct KeySchedule {
     exchange: [u8; 32],
     local_auth: [u8; 32],
     peer_auth: [u8; 32],
+}
+
+impl core::fmt::Debug for TrafficKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TrafficKey").finish_non_exhaustive()
+    }
+}
+
+impl core::fmt::Debug for SecureChannel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SecureChannel").finish_non_exhaustive()
+    }
+}
+
+impl core::fmt::Debug for KeySchedule {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("KeySchedule").finish_non_exhaustive()
+    }
 }
 
 impl KeySchedule {
@@ -465,6 +483,19 @@ mod tests {
                 &server_schedule,
             )?,
         ))
+    }
+
+    #[test]
+    fn debug_omits_traffic_and_handshake_keys() {
+        let (client, _) = ok(sample_channels(0, 0));
+        assert_eq!(format!("{client:?}"), "SecureChannel { .. }");
+        assert_eq!(format!("{:?}", client.send), "TrafficKey { .. }");
+        let schedule = KeySchedule {
+            exchange: [173; 32],
+            local_auth: [174; 32],
+            peer_auth: [175; 32],
+        };
+        assert_eq!(format!("{schedule:?}"), "KeySchedule { .. }");
     }
 
     #[test]

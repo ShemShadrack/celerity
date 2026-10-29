@@ -156,6 +156,9 @@ IPC is local-only. It does not travel over Wi-Fi, Ethernet, or between separate 
 
 For non-loopback TCP, the intended path is CURVE-RS. The library defaults to failing closed for remote `NULL` unless you explicitly opt into insecure mode.
 
+`SecurityConfig::curve()` generates a new random identity. To keep the same identity
+across restarts, supply a saved keypair through `CurveConfig::local_static_keypair`.
+
 The high-level CLI is meant for local workflows first. For remote hosts, use the library API with an explicit `SecurityConfig::curve()` setup and managed key material.
 
 That means host-to-VM traffic over a real IP is TCP, but it is no longer treated as a local loopback link. If you want that path to be secure and reliable beyond local experiments, use CURVE-RS through the library API rather than relying on plain `NULL`.

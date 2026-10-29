@@ -44,7 +44,7 @@ enum CurveStage {
     Established,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct CurveMechanism {
     stage: CurveStage,
     transcript: Vec<u8>,
@@ -58,6 +58,14 @@ pub(crate) struct CurveMechanism {
     server_nonce_seed: Option<[u8; 8]>,
     cookie: Option<[u8; 32]>,
     channel: Option<SecureChannel>,
+}
+
+impl core::fmt::Debug for CurveMechanism {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CurveMechanism")
+            .field("stage", &self.stage)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CurveMechanism {

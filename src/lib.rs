@@ -165,13 +165,22 @@ impl Default for SecurityPolicy {
     }
 }
 
-/// A CURVE static keypair.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A CURVE static keypair. Debug output omits the secret key.
+#[derive(Clone, PartialEq, Eq)]
 pub struct CurveKeyPair {
     /// The local X25519 secret key bytes.
     pub secret: [u8; 32],
     /// The corresponding X25519 public key bytes.
     pub public: [u8; 32],
+}
+
+impl core::fmt::Debug for CurveKeyPair {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CurveKeyPair")
+            .field("secret", &"[REDACTED]")
+            .field("public", &self.public)
+            .finish()
+    }
 }
 
 impl CurveKeyPair {
@@ -212,6 +221,10 @@ impl CurveKeyPair {
 }
 
 /// Configuration for the CURVE security mechanism.
+///
+/// With the `curve` feature enabled, defaults generate a new random keypair.
+/// Set [`Self::local_static_keypair`] to reuse a saved identity. Cloning preserves
+/// the keypair. Without `curve`, the default keypair is a nonfunctional placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurveConfig {
     /// The expected server public key pinned by a client, when configured.
@@ -233,9 +246,9 @@ pub struct CurveConfig {
 impl Default for CurveConfig {
     fn default() -> Self {
         #[cfg(feature = "curve")]
-        let local_static_keypair = CurveKeyPair::from_secret([7; 32]);
+        let local_static_keypair = CurveKeyPair::generate();
         #[cfg(not(feature = "curve"))]
-        let local_static_keypair = CurveKeyPair::from_parts([7; 32], [0; 32]);
+        let local_static_keypair = CurveKeyPair::from_parts([0; 32], [0; 32]);
 
         Self {
             server_public_key: None,
@@ -816,6 +829,49 @@ mod tests {
             Ok(_) => panic!("expected Err(..), got Ok(..)"),
             Err(err) => err,
         }
+    }
+
+    #[test]
+    fn curve_debug_hides_secret_keys() {
+        #[cfg(feature = "curve")]
+        let keypair = super::CurveKeyPair::from_secret([173; 32]);
+        #[cfg(not(feature = "curve"))]
+        let keypair = super::CurveKeyPair::from_parts([173; 32], [42; 32]);
+        let secret = format!("{:?}", keypair.secret);
+        let curve = super::CurveConfig {
+            local_static_keypair: keypair.clone(),
+            ..super::CurveConfig::default()
+        };
+        let config = PeerConfig::new(SocketType::Req, SecurityRole::Client, LinkScope::Local)
+            .with_security(SecurityConfig::curve().with_curve_config(curve));
+        for debug in [
+            format!("{keypair:?}"),
+            format!("{config:#?}"),
+            format!("{config:?}"),
+            format!("{:?}", crate::CelerityPeer::new(config)),
+        ] {
+            assert!(debug.contains("[REDACTED]"));
+            assert!(!debug.contains(&secret));
+        }
+        assert!(format!("{keypair:?}").contains(&format!("{:?}", keypair.public)));
+    }
+
+    #[cfg(feature = "curve")]
+    #[test]
+    fn default_curve_keypairs_are_unique_and_valid() {
+        let first = super::CurveConfig::default();
+        let second = super::CurveConfig::default();
+
+        assert_ne!(
+            first.local_static_keypair.public,
+            second.local_static_keypair.public
+        );
+        ok(super::validate_curve_keypair(&first.local_static_keypair));
+        ok(super::validate_curve_keypair(&second.local_static_keypair));
+        assert_eq!(
+            first.clone().local_static_keypair,
+            first.local_static_keypair
+        );
     }
 
     #[test]
