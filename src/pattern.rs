@@ -759,7 +759,7 @@ mod tests {
 
         let blocked = core.on_peer_event(1, PeerEvent::Message(vec![Bytes::from_static(b"zzz")]));
         let blocked = ok(blocked);
-        assert!(blocked.is_empty());
+        assert_eq!(blocked, []);
     }
 
     #[test]
@@ -904,16 +904,14 @@ mod tests {
     fn pullcore_ignores_non_message_events() {
         let mut core = PullCore::<u8>::new();
 
-        assert!(
-            ok(core.on_peer_event(
-                4,
-                PeerEvent::HandshakeComplete {
-                    peer_socket_type: crate::SocketType::Push,
-                    metadata: crate::MetadataMap::new(),
-                },
-            ))
-            .is_empty()
-        );
+        let actions = ok(core.on_peer_event(
+            4,
+            PeerEvent::HandshakeComplete {
+                peer_socket_type: crate::SocketType::Push,
+                metadata: crate::MetadataMap::new(),
+            },
+        ));
+        assert_eq!(actions, []);
     }
 
     #[test]
@@ -936,7 +934,7 @@ mod tests {
             PeerEvent::Message(vec![Bytes::new(), Bytes::from_static(b"wrong")]),
         );
         let ignored = ok(ignored);
-        assert!(ignored.is_empty());
+        assert_eq!(ignored, []);
 
         let delivered = core.on_peer_event(
             1,
@@ -1086,14 +1084,14 @@ mod tests {
             PeerEvent::Message(vec![Bytes::new(), Bytes::from_static(b"two")]),
         );
         let none = ok(none);
-        assert!(none.is_empty());
+        assert_eq!(none, []);
 
         let none = core.on_peer_event(
             2,
             PeerEvent::Message(vec![Bytes::new(), Bytes::from_static(b"three")]),
         );
         let none = ok(none);
-        assert!(none.is_empty());
+        assert_eq!(none, []);
 
         let after_reply = ok(core.reply(vec![Bytes::from_static(b"ok")]));
         assert_eq!(
@@ -1139,7 +1137,7 @@ mod tests {
             PeerEvent::Message(vec![Bytes::new(), Bytes::from_static(b"two")]),
         );
         let second = ok(second);
-        assert!(second.is_empty());
+        assert_eq!(second, []);
 
         let actions = ok(core.remove_peer(1));
         assert_eq!(

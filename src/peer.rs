@@ -530,7 +530,7 @@ mod tests {
             err(receiver.handle_input(&[0, 1, b'e'])),
             ProtocolError::MessageLimitExceeded(4)
         );
-        assert!(receiver.current_message.is_empty());
+        assert_eq!(receiver.current_message, Vec::<Bytes>::new());
         assert_eq!(receiver.current_message_bytes, 0);
         assert!(receiver.poll_output().is_none());
     }
@@ -551,7 +551,7 @@ mod tests {
             err(receiver.handle_input(&[1, 0])),
             ProtocolError::MessageFrameLimitExceeded(2)
         );
-        assert!(receiver.current_message.is_empty());
+        assert_eq!(receiver.current_message, Vec::<Bytes>::new());
     }
 
     #[test]
@@ -667,7 +667,7 @@ mod tests {
                 Bytes::from_static(b"cd"),
             ])));
             assert_eq!(err(pump(&mut sender, &mut receiver)), expected);
-            assert!(receiver.current_message.is_empty());
+            assert_eq!(receiver.current_message, Vec::<Bytes>::new());
             assert_eq!(err(receiver.handle_input(&[])), expected);
         }
     }
